@@ -112,6 +112,8 @@ where
     /// otherwise, the return value is always a non-empty string.
     #[inline(always)]
     pub fn chunk(&self) -> &str {
+        // SAFETY: the first `len_utf8` bytes of `buf` are always valid UTF-8,
+        // verified in `read_chunk`.
         unsafe { str::from_utf8_unchecked(&self.buf[..self.len_utf8]) }
     }
 
@@ -132,7 +134,7 @@ where
                 Ok(0) => break,
                 Ok(n) => self.len += n,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err(err),
             }
         }
 

@@ -118,7 +118,7 @@ impl<'src> ScannerLite<'src> {
         unsafe {
             str::from_utf8_unchecked(slice::from_raw_parts(
                 start,
-                self.start as usize - start as usize,
+                (self.start as usize).unchecked_sub(start as usize),
             ))
         }
     }

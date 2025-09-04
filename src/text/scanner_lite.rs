@@ -16,7 +16,6 @@ pub struct ScannerLite<'src> {
 impl<'src> ScannerLite<'src> {
     #[inline]
     pub fn new(source_str: &'src str) -> Self {
-        // SAFETY: just decomposing the slice into start and end pointers
         unsafe {
             Self {
                 start: source_str.as_ptr(),
@@ -26,46 +25,60 @@ impl<'src> ScannerLite<'src> {
         }
     }
 
-    /// Skips a character if it is at the start of the remaining string.
+    /// Skips an expected code point at the start of the remaining string.
     ///
-    /// Returns `true` if the character was skipped.
+    /// Returns `false` if the remaining string is empty or does not start with
+    /// the expected [`char`] value.
     #[inline]
     pub fn expect_char(&mut self, expected: char) -> bool {
         if !self.remaining_str().starts_with(expected) {
             return false;
         }
 
-        // SAFETY: we know the string starts with this char
-        unsafe { self.expect_char_unchecked(expected) };
+        unsafe {
+            self.expect_char_unchecked(expected);
+        }
 
         true
     }
 
-    /// Skips a known character without checking it.
+    /// Skips an expected code point at the start of the remaining
+    /// string.without checking it.
+    ///
+    /// # Safety
+    ///
+    /// The remaining string must start with the expected [`char`] value.
     #[inline]
     pub unsafe fn expect_char_unchecked(&mut self, expected: char) {
-        unsafe { self.skip_bytes_unchecked(expected.len_utf8()) };
+        unsafe { self.skip_bytes_unchecked(expected.len_utf8()) }
     }
 
-    /// Skips a string of characters if it is at the start of the remaining string.
+    /// Skips an expected prefix at the start of the remaining string.
     ///
-    /// Returns `true` if the string was skipped.
+    /// Returns `false` if the remaining string does not start with the expected
+    /// string.
     #[inline]
     pub fn expect_str(&mut self, expected: &str) -> bool {
         if !self.remaining_str().starts_with(expected) {
             return false;
         }
 
-        // SAFETY: we have just verified the string starts with this prefix
-        unsafe { self.expect_str_unchecked(expected) };
+        unsafe {
+            self.expect_str_unchecked(expected);
+        }
 
         true
     }
 
-    /// Skips a known string of characters without checking it.
+    /// Skips an expected prefix at the start of the remaining string without
+    /// checking it.
+    ///
+    /// # Safety
+    ///
+    /// The remaining string must start with the given [`str`] prefix.
     #[inline]
     pub unsafe fn expect_str_unchecked(&mut self, expected: &str) {
-        unsafe { self.skip_bytes_unchecked(expected.len()) };
+        unsafe { self.skip_bytes_unchecked(expected.len()) }
     }
 
     /// Returns `true` if the remaining string is empty.
@@ -74,26 +87,25 @@ impl<'src> ScannerLite<'src> {
         self.start == self.end
     }
 
-    /// Decodes the next [`char`] in the string and advances the scanner
-    /// position.
+    /// Advances past the next code point in the string and returns it as a
+    /// [`char`].
+    ///
+    /// Returns [`None`] if the remining string is empty.
     #[inline]
     pub fn next_char(&mut self) -> Option<char> {
-        // SAFETY: fight me IRL
-        unsafe { str::Chars::next(mem::transmute(self)) }
+        // ScannerLite has the same layout as str::Chars
+        unsafe { str::Chars::next(mem::transmute::<&mut Self, &mut str::Chars>(self)) }
     }
 
-    /// Advances the scanner to the start of the next line and returns the
-    /// remainder of the current line.
+    /// Advances past the next line in the string and returns it as a [`str`].
     ///
-    /// The newline character is included in the return value. If the scanner
-    /// reaches the end of the source string before finding a newline, the
-    /// entire remaining string is returned (which could be empty).
+    ///  If the line ends with a newline character, it is included in the return
+    /// value. Returns `""` if the remaining string is empty.
     #[inline]
     pub fn next_line(&mut self) -> &'src str {
         let start = self.start;
 
         while let Some(b) = self.peek_byte() {
-            // SAFETY: we have just peeked a byte
             unsafe {
                 self.skip_bytes_unchecked(1);
             }
@@ -111,23 +123,21 @@ impl<'src> ScannerLite<'src> {
         }
     }
 
-    /// Returns the next byte in the source string without advancing the scanner
-    /// position.
+    /// Returns the next byte in the string.
     ///
-    /// Useful for validating ASCII characters without first decoding UTF-8
-    /// codepoints into [`char`] values.
+    /// Returns [`None`] if the remaining string is empty.
     #[inline]
     pub fn peek_byte(&self) -> Option<u8> {
         if self.is_done() {
             return None;
         }
 
-        // SAFETY: we know there's a valid byte here
         unsafe { Some(*self.start) }
     }
 
-    /// Decodes the next [`char`] in the source string without advancing the
-    /// scanner position.
+    /// Returns the next code point in the string as a [`char`].
+    ///
+    /// Returns [`None`] if the remaining string is empty.
     #[inline]
     pub fn peek_char(&self) -> Option<char> {
         self.clone().next_char()
@@ -145,10 +155,11 @@ impl<'src> ScannerLite<'src> {
         unsafe { str::from_utf8_unchecked(slice::from_raw_parts(self.start, self.remaining_len())) }
     }
 
-    /// Skips zero or more ASCII whitespace characters.
+    /// Skips any ASCII whitespace characters at the start of the remaining
+    /// string.
     ///
-    /// This is faster than `skip_whitespace` but does not recognize Unicode
-    /// whitespace.
+    /// This is more efficient than `skip_whitespace` but does not recognize
+    /// Unicode whitespace.
     #[inline]
     pub fn skip_ascii_whitespace(&mut self) {
         while let Some(byte) = self.peek_byte() {
@@ -156,28 +167,34 @@ impl<'src> ScannerLite<'src> {
                 break;
             }
 
-            // SAFETY: we know self.start < self.end
-            self.start = unsafe { self.start.add(1) };
+            unsafe {
+                self.start = self.start.add(1);
+            }
         }
     }
 
-    /// Skips the next `n` bytes in the string, without bounds checking or
-    /// ensuring the scanner stops on a UTF-8 character boundary.
+    /// Skips the next `n` bytes in the string without checking them.
+    ///
+    /// # Safety
+    ///
+    /// The remaining string must start with a series of `n` bytes that does not
+    /// end in the middle of a code point.
     #[inline]
     pub unsafe fn skip_bytes_unchecked(&mut self, n: usize) {
-        unsafe { self.start = self.start.add(n) };
+        unsafe {
+            self.start = self.start.add(n);
+        }
     }
 
-    /// Skips the next character in the string.
+    /// Skips the next code point in the string.
     ///
-    /// Returns `false` if the string was empty.
+    /// Returns `false` if the remaining string is empty.
     #[inline]
     pub fn skip_char(&mut self) -> bool {
         if self.start == self.end {
             return false;
         }
 
-        // SAFETY: string is verified non-empty
         unsafe {
             let first_byte = *self.start;
 
@@ -194,22 +211,23 @@ impl<'src> ScannerLite<'src> {
         true
     }
 
-    /// Skips characters while they match a given predicate condition.
+    /// Skips any code points at the start of the string that match a given
+    /// condition.
     #[inline]
-    pub fn skip_chars_while(&mut self, predicate: impl Fn(char) -> bool) {
+    pub fn skip_chars_while(&mut self, condition: impl Fn(char) -> bool) {
         while let Some(ch) = self.peek_char() {
-            if !predicate(ch) {
+            if !condition(ch) {
                 break;
             }
 
-            // SAFETY: we know this char is at the start
             unsafe {
                 self.start = self.start.add(ch.len_utf8());
             }
         }
     }
 
-    /// Skips zero or more whitespace characters.
+    /// Skips any whitespace characters at the start of the remaining string.
+    #[inline]
     pub fn skip_whitespace(&mut self) {
         self.skip_chars_while(char::is_whitespace);
     }

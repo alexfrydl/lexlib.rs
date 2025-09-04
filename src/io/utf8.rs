@@ -1,4 +1,4 @@
-use std::{io, mem};
+use std::{io, mem, str};
 
 /// Reads one [`char`] at a time from an [`io::Read`] implementor, using a
 /// temporary storage buffer to minimize read calls.
@@ -23,8 +23,7 @@ use std::{io, mem};
 /// [`std::str::Chars`].
 pub struct Utf8CharReader<'buf, Inner> {
     reader: Utf8ChunkReader<'buf, Inner>,
-    // fake static iterator for iterating over reader.chunk().chars()
-    iter: std::str::Chars<'static>,
+    iter: str::Chars<'buf>,
 }
 
 /// Reads chunks of valid UTF-8 characters from an [`io::Read`] implementor,
@@ -85,9 +84,13 @@ where
     fn read_char_next_chunk(&mut self) -> io::Result<Option<char>> {
         let result = self.reader.read_chunk();
 
-        // SAFETY: this iter is valid (even on error) until the next
-        // call changes the chunk buffer.
-        self.iter = unsafe { mem::transmute(self.reader.chunk().chars()) };
+        unsafe {
+            // this lifetime cast doesn't make sense in reality, but we can
+            // safely pretend that it does as long as we don't ever read a chunk
+            // without creating a new iterator for it as well
+            self.iter =
+                mem::transmute::<str::Chars<'_>, str::Chars<'buf>>(self.reader.chunk().chars());
+        }
 
         result.map(|_| self.iter.next())
     }
@@ -112,8 +115,6 @@ where
     /// otherwise, the return value is always a non-empty string.
     #[inline(always)]
     pub fn chunk(&self) -> &str {
-        // SAFETY: the first `len_utf8` bytes of `buf` are always valid UTF-8,
-        // verified in `read_chunk`.
         unsafe { str::from_utf8_unchecked(&self.buf[..self.len_utf8]) }
     }
 

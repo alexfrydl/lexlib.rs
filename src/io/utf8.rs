@@ -1,13 +1,14 @@
-use std::{io, mem, str};
+use std::{io, mem, ptr, str};
 
-/// Reads one [`char`] at a time from an [`io::Read`] implementor, using a
-/// temporary storage buffer to minimize read calls.
+/// Reads UTF-8 data from an [`io::Read`] implementation character-by-character,
+/// using a temporary storage buffer to minimize read calls.
 ///
 /// # Example
 ///
 /// ```no_run
-/// let file = io::File::open("example.txt");
-/// let mut reader = Utf8CharReader::new(&mut vec![0u8; 8192], file);
+/// let file = File::open("example.txt");
+/// let mut buf = vec![0u8; 8192];
+/// let mut reader = Utf8CharReader::new(&mut buf, file);
 ///
 /// while let Some(ch) = reader.read_char()? {
 ///     print!("{}", ch);
@@ -20,20 +21,21 @@ use std::{io, mem, str};
 /// hold in memory or is of unknown length. Otherwise, it is usually more
 /// performant to use [`io::Read::read_to_string`], or another method of reading
 /// the entire input into memory, and iterate over the result with
-/// [`std::str::Chars`].
+/// [`str::Chars`].
 pub struct Utf8CharReader<'buf, Inner> {
     reader: Utf8ChunkReader<'buf, Inner>,
     iter: str::Chars<'buf>,
 }
 
-/// Reads chunks of valid UTF-8 characters from an [`io::Read`] implementor,
+/// Reads chunks of valid UTF-8 characters from an [`io::Read`] implementation,
 /// using a temporary storage buffer to minimize read calls.
 ///
 /// # Example
 ///
 /// ```no_run
-/// let file = io::File::open("example.txt");
-/// let mut reader = Utf8ChunkReader::new(&mut vec![0u8; 8192], file);
+/// let file = File::open("example.txt");
+/// let mut buf = vec![0u8; 8192];
+/// let mut reader = Utf8ChunkReader::new(&mut buf, file);
 ///
 /// while reader.read_chunk()? {
 ///     print!("{}", reader.chunk());
@@ -59,6 +61,7 @@ impl<'buf, Inner> Utf8CharReader<'buf, Inner>
 where
     Inner: io::Read,
 {
+    #[inline]
     pub fn new(buf: &'buf mut [u8], inner: Inner) -> Self {
         Self {
             reader: Utf8ChunkReader::new(buf, inner),
@@ -69,30 +72,29 @@ where
     /// Reads the next valid [`char`].
     ///
     /// Returns [`None`] if there is no data to read.
-    #[inline(always)]
     pub fn read_char(&mut self) -> io::Result<Option<char>> {
-        match self.iter.next() {
-            None => self.read_char_next_chunk(),
-            ch => Ok(ch),
+        if let Some(ch) = self.iter.next() {
+            return Ok(Some(ch));
         }
-    }
 
-    /// Reads the next chunk and returns its first valid [`char`].
-    ///
-    /// This is a separate function because only the main `match` in `read_char`
-    /// needs to be inlined.
-    fn read_char_next_chunk(&mut self) -> io::Result<Option<char>> {
         let result = self.reader.read_chunk();
 
         unsafe {
-            // this lifetime cast doesn't make sense in reality, but we can
-            // safely pretend that it does as long as we don't ever read a chunk
-            // without creating a new iterator for it as well
+            // this lifetime cast doesn't make sense in reality, because the
+            // slice the iterator represents is only known to be valid UTF-8
+            // until the next call to `read_chunk`, but it's safe to pretend
+            // this cast makes sense because we always reconstruct the iterator
+            // after every new chunk read.
             self.iter =
                 mem::transmute::<str::Chars<'_>, str::Chars<'buf>>(self.reader.chunk().chars());
-        }
 
-        result.map(|_| self.iter.next())
+            Ok(match result? {
+                // if `read_chunk` says the string is non-empty, we know there's
+                // at least one `char` to get
+                true => Some(self.iter.next().unwrap_unchecked()),
+                false => None,
+            })
+        }
     }
 }
 
@@ -100,6 +102,7 @@ impl<'buf, Inner> Utf8ChunkReader<'buf, Inner>
 where
     Inner: io::Read,
 {
+    #[inline]
     pub fn new(buf: &'buf mut [u8], inner: Inner) -> Self {
         Self {
             inner,
@@ -111,44 +114,60 @@ where
 
     /// Gets the last read chunk of valid UTF-8 characters.
     ///
-    /// Returns `""` if no chunk has been read or an error has occured;
+    /// Returns `""` if no chunk has been read yet or an error has occured;
     /// otherwise, the return value is always a non-empty string.
-    #[inline(always)]
+    #[inline]
     pub fn chunk(&self) -> &str {
-        unsafe { str::from_utf8_unchecked(&self.buf[..self.len_utf8]) }
+        unsafe { str::from_utf8_unchecked(self.buf.get_unchecked(..self.len_utf8)) }
     }
 
     /// Reads the next chunk of valid UTF-8 characters.
     ///
     /// Returns `false` if there is no data to read.
     pub fn read_chunk(&mut self) -> io::Result<bool> {
-        // reset the buffer
+        unsafe {
+            // reset the buffer
 
-        self.buf.copy_within(self.len_utf8..self.len, 0);
-        self.len -= self.len_utf8;
-        self.len_utf8 = 0;
+            let buf_ptr = self.buf.as_mut_ptr();
+            let tail_ptr = buf_ptr.add(self.len_utf8);
+            let tail_len = self.len - self.len_utf8;
 
-        // read until the buffer is full
+            // copies any dangling invalid/incomplete UTF-8 chars to the front
+            // of the buf
+            ptr::copy(tail_ptr, buf_ptr, tail_len);
 
-        while self.len < self.buf.len() {
-            match self.inner.read(&mut self.buf[self.len..]) {
-                Ok(0) => break,
-                Ok(n) => self.len += n,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(err),
+            self.len = tail_len;
+            self.len_utf8 = 0;
+
+            // read until the buffer is full
+
+            while self.len != self.buf.len() {
+                match self.inner.read(self.buf.get_unchecked_mut(self.len..)) {
+                    Ok(0) => break,
+                    Ok(n) => self.len += n,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(err),
+                }
             }
+
+            if self.len == 0 {
+                return Ok(false);
+            }
+
+            // validate utf8 bytes
+
+            self.len_utf8 = self
+                .buf
+                // len is always > 0 and <= buf.len()
+                .get_unchecked(..self.len)
+                .utf8_chunks()
+                .next()
+                // utf8_chunks() always returns at least one element if the
+                // slice is non-empty
+                .unwrap_unchecked()
+                .valid()
+                .len();
         }
-
-        if self.len == 0 {
-            return Ok(false);
-        }
-
-        // validate utf8 bytes
-
-        self.len_utf8 = match self.buf[..self.len].utf8_chunks().next() {
-            Some(chunk) => chunk.valid().len(),
-            None => 0,
-        };
 
         if self.len_utf8 == 0 {
             return Err(io::Error::new(

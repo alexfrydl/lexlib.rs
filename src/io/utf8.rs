@@ -1,4 +1,4 @@
-use std::{io, mem, ptr, str};
+use std::{fmt, io, mem, ptr, str};
 
 /// Reads UTF-8 data from an [`io::Read`] implementation character-by-character,
 /// using a temporary storage buffer to minimize read calls.
@@ -174,5 +174,17 @@ where
         }
 
         Ok(true)
+    }
+}
+
+impl<Inner> fmt::Debug for Utf8CharReader<'_, Inner> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Utf8CharReader")
+    }
+}
+
+impl<Inner> fmt::Debug for Utf8ChunkReader<'_, Inner> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Utf8ChunkReader")
     }
 }

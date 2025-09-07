@@ -1,4 +1,4 @@
-use std::{slice, str};
+use std::{fmt, slice, str};
 
 /// A specialized iterator designed for scanning and parsing strings.
 ///
@@ -253,5 +253,17 @@ impl<'src> Scanner<'src> {
         self.consume_whitespace();
 
         unsafe { self.slice_back_unchecked(from) }
+    }
+}
+
+impl fmt::Debug for Scanner<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Scanner")
+            .field("column", &self.column)
+            .field("line", &self.line)
+            .field("peek_char", &self.peek)
+            .field("position", &self.position())
+            .field("remaining_len", &self.remaining_len())
+            .finish()
     }
 }

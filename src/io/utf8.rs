@@ -80,11 +80,8 @@ where
         let result = self.reader.read_chunk();
 
         unsafe {
-            // this lifetime cast doesn't make sense in reality, because the
-            // slice the iterator represents is only known to be valid UTF-8
-            // until the next call to `read_chunk`, but it's safe to pretend
-            // this cast makes sense because we always reconstruct the iterator
-            // after every new chunk read.
+            // fudging the lifetime is safe because this iter is always replaced
+            // when we read a new chunk and is never exposed to calling code
             self.iter =
                 mem::transmute::<str::Chars<'_>, str::Chars<'buf>>(self.reader.chunk().chars());
 
